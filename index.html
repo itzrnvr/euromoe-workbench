@@ -147,6 +147,7 @@ function send(){
   document.getElementById("ti").value="";
   addM("user",t);
   curMsg=addM("a","");
+  curMsg.querySelector(".b").innerHTML='<span style="color:var(--m)">Thinking...</span>';
   curText="";
   overrides={};
   document.getElementById("sb").disabled=true;
@@ -155,6 +156,7 @@ function send(){
     .then(r=>r.json()).then(d=>{
       if(d.error){alert(d.error);document.getElementById("sb").disabled=false;return;}
       buildPanels();
+      curMsg.querySelector(".b").innerHTML='<span style="color:var(--m)">Generating...</span>';
       genNext();
     });
 }
