@@ -71,29 +71,55 @@ def load_model():
                     if rl.dim() == 3: rl = rl[:, -1, :]
                     probs = F.softmax(rl.float(), dim=-1).squeeze(0)
                     
-                    # Apply modifications
+                    # Apply modifications — WITH SAFETY CHECKS
                     forced = mods["forced_experts"].get(str(layer_idx)) or mods["forced_experts"].get(layer_idx)
                     disabled = mods["disabled_experts"].get(str(layer_idx)) or mods["disabled_experts"].get(layer_idx)
                     
                     if forced:
-                        # Override with user-specified experts
+                        # SAFETY: validate indices are in range and unique
+                        forced = [int(x) for x in forced if isinstance(x, (int, float)) and 0 <= int(x) < n_experts]
+                        forced = list(set(forced))  # remove duplicates
+                        if len(forced) == 0:
+                            forced = list(range(8))  # fallback to default
+                        # Clamp count to avoid topk errors
+                        forced = forced[:min(len(forced), n_experts)]
+                        
                         forced_idx = torch.tensor(forced, device=DEVICE, dtype=torch.long)
                         forced_w = probs[forced_idx]
-                        forced_w = forced_w / forced_w.sum()
+                        # SAFETY: prevent division by zero
+                        w_sum = forced_w.sum().clamp_min(1e-8)
+                        forced_w = forced_w / w_sum
+                        # SAFETY: check for NaN/Inf
+                        if torch.isnan(forced_w).any() or torch.isinf(forced_w).any():
+                            forced_w = torch.ones_like(forced_w) / len(forced)  # uniform fallback
                         tw_new = forced_w.unsqueeze(0)
                         ti_new = forced_idx.unsqueeze(0)
                         return (rl, tw_new, ti_new)
                     
                     if disabled:
-                        # Zero out disabled experts
+                        # SAFETY: validate indices
+                        disabled = [int(x) for x in disabled if isinstance(x, (int, float)) and 0 <= int(x) < n_experts]
                         probs_modified = probs.clone()
                         for d in disabled:
                             probs_modified[d] = 0
-                        probs_modified = probs_modified / probs_modified.sum()
-                        tw_new, ti_new = torch.topk(probs_modified, k=mods["n_active_experts"])
-                        tw_new = tw_new / tw_new.sum()
-                        return (rl, tw_new.unsqueeze(0) if tw_new.dim()==1 else tw_new, 
-                                ti_new.unsqueeze(0) if ti_new.dim()==1 else ti_new)
+                        # SAFETY: check that at least n_active experts remain
+                        n_remaining = (probs_modified > 0).sum().item()
+                        n_keep = min(mods["n_active_experts"], n_remaining)
+                        if n_keep < 1:
+                            # All experts disabled — skip modification, use original
+                            pass
+                        else:
+                            p_sum = probs_modified.sum().clamp_min(1e-8)
+                            probs_modified = probs_modified / p_sum
+                            # SAFETY: check for NaN
+                            if torch.isnan(probs_modified).any() or torch.isinf(probs_modified).any():
+                                probs_modified = probs  # fallback to original
+                            else:
+                                tw_new, ti_new = torch.topk(probs_modified, k=n_keep)
+                                tw_new = tw_new / tw_new.sum().clamp_min(1e-8)
+                                tw_new = tw_new.unsqueeze(0) if tw_new.dim()==1 else tw_new
+                                ti_new = ti_new.unsqueeze(0) if ti_new.dim()==1 else ti_new
+                                return (rl, tw_new, ti_new)
                     
                     # Store real routing
                     if _hooks_active:
@@ -165,97 +191,127 @@ def load_model():
 
 
 def generate_step():
-    """Generate exactly ONE token and return full state."""
-    global _hooks_active
+    """Generate exactly ONE token. WITH GPU SAFETY GUARDS."""
+    global _hooks_active, is_generating
+    
+    # GUARD 1: prevent concurrent generation
+    if is_generating:
+        return {"error": "Generation in progress, wait..."}
+    is_generating = True
+    
+    # GUARD 2: check GPU memory
+    if torch.cuda.is_available():
+        free_mb = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / 1048576
+        if free_mb < 400:
+            torch.cuda.empty_cache()
+            free_mb = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()) / 1048576
+            if free_mb < 200:
+                is_generating = False
+                return {"error": "Low GPU memory (" + str(int(free_mb)) + "MB). Clear conversation."}
+    
+    # GUARD 3: check sequence length
+    if session["input_ids"] is not None and session["input_ids"].shape[1] > 2048:
+        is_generating = False
+        return {"error": "Context too long (max 2048). Clear conversation."}
+    
+    # GUARD 4: validate forced token
+    if mods["forced_token"] is not None and (not isinstance(mods["forced_token"], int) or mods["forced_token"] < 0):
+        mods["forced_token"] = None
+    
     last_step_data.clear()
     _hooks_active = True
-    
     t_start = time.perf_counter()
     
-    with torch.inference_mode():
-        outputs = model(session["input_ids"], use_cache=True, output_attentions=True)
-        logits = outputs.logits[:, -1, :]
-        
-        # Apply attention sparsity if set
-        if mods["attn_sparsity"] > 0 and outputs.attentions:
-            pass  # Sparsity would need hook on attention weights, complex
-        
-        # Token selection
-        if mods["forced_token"] is not None:
-            next_id = mods["forced_token"]
-            forced = True
-        else:
-            next_id = logits.argmax(dim=-1).item()
-            forced = False
-        
-        # Top predictions
-        top5_vals, top5_idx = torch.topk(logits.float(), 10)
-        top5_probs = F.softmax(logits.float(), dim=-1)[0, top5_idx[0]]
-        preds = [
-            {"t": tokenizer.decode([i.item()]), "id": i.item(), "p": float(top5_probs[j].item())}
-            for j, i in enumerate(top5_idx[0])
-        ]
-        
-        # KV cache info
-        kv_info = {"n_tokens": 0, "size_mb": 0}
-        if outputs.past_key_values:
-            total_el = 0
-            for lk in outputs.past_key_values:
-                for t in lk:
-                    if t is not None and hasattr(t, 'numel'):
-                        total_el += t.numel()
-            kv_info = {"n_tokens": session["input_ids"].shape[1], "size_mb": round(total_el * 2 / 1048576, 1)}
-        
-        # Attention weights (last layer, last query)
-        attn_data = []
-        seq_strs = [tokenizer.decode([t]) for t in session["input_ids"][0]]
-        if outputs.attentions:
-            for li, attn in enumerate(outputs.attentions):
-                w = attn[0, :, -1, :].float().mean(dim=0).cpu()
-                attn_data.append({
-                    "layer": li,
-                    "weights": [round(v, 4) for v in w.tolist()],
-                })
-        
-        total_time = (time.perf_counter() - t_start) * 1000
-        attn_total = sum(a["ms"] for a in last_step_data.get("attn_ms", []))
-        moe_total = sum(a["ms"] for a in last_step_data.get("moe_ms", []))
-        
-        token_str = tokenizer.decode([next_id])
-        
-        result = {
-            "token": token_str,
-            "token_id": next_id,
-            "forced": forced,
-            "text": tokenizer.decode(session["generated_ids"] + [next_id]),
-            "time_ms": round(total_time, 1),
-            "attn_total": round(attn_total, 1),
-            "moe_total": round(moe_total, 1),
-            "other_ms": round(total_time - attn_total - moe_total, 1),
-            "preds": preds,
-            "kv_cache": kv_info,
-            "hidden": last_step_data.get("hidden", []),
-            "routing": last_step_data.get("routing", []),
-            "attn_ms": last_step_data.get("attn_ms", []),
-            "moe_ms": last_step_data.get("moe_ms", []),
-            "embedding": last_step_data.get("embedding", []),
-            "attentions": attn_data,
-            "seq_strs": seq_strs,
-            "mods": {k: v for k, v in mods.items()},
-        }
-        
-        # Update session
-        session["generated_ids"].append(next_id)
-        session["input_ids"] = torch.cat([session["input_ids"], torch.tensor([[next_id]], device=DEVICE)], dim=-1)
-        
-        # Reset forced token after use
-        mods["forced_token"] = None
-        
-        del outputs, logits
-        torch.cuda.empty_cache()
+    try:
+        with torch.inference_mode():
+            outputs = model(session["input_ids"], use_cache=True, output_attentions=True)
+            logits = outputs.logits[:, -1, :]
+            
+            # GUARD 5: check for NaN in output (corrupted routing can cause this)
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                raise RuntimeError("NaN/Inf detected in model output — resetting modifications")
+            
+            # Token selection
+            if mods["forced_token"] is not None:
+                next_id = mods["forced_token"]
+                forced = True
+            else:
+                next_id = logits.argmax(dim=-1).item()
+                forced = False
+            
+            # Top predictions
+            top5_vals, top5_idx = torch.topk(logits.float(), 10)
+            top5_probs = F.softmax(logits.float(), dim=-1)[0, top5_idx[0]]
+            preds = [
+                {"t": tokenizer.decode([i.item()]), "id": i.item(), "p": float(top5_probs[j].item())}
+                for j, i in enumerate(top5_idx[0])
+            ]
+            
+            # KV cache info
+            kv_info = {"n_tokens": 0, "size_mb": 0}
+            if outputs.past_key_values:
+                total_el = 0
+                for lk in outputs.past_key_values:
+                    for t in lk:
+                        if t is not None and hasattr(t, 'numel'):
+                            total_el += t.numel()
+                kv_info = {"n_tokens": session["input_ids"].shape[1], "size_mb": round(total_el * 2 / 1048576, 1)}
+            
+            # Attention weights (last layer, last query)
+            attn_data = []
+            seq_strs = [tokenizer.decode([t]) for t in session["input_ids"][0]]
+            if outputs.attentions:
+                for li, attn in enumerate(outputs.attentions):
+                    w = attn[0, :, -1, :].float().mean(dim=0).cpu()
+                    attn_data.append({"layer": li, "weights": [round(v, 4) for v in w.tolist()]})
+            
+            total_time = (time.perf_counter() - t_start) * 1000
+            attn_total = sum(a["ms"] for a in last_step_data.get("attn_ms", []))
+            moe_total = sum(a["ms"] for a in last_step_data.get("moe_ms", []))
+            
+            token_str = tokenizer.decode([next_id])
+            
+            result = {
+                "token": token_str, "token_id": next_id, "forced": forced,
+                "text": tokenizer.decode(session["generated_ids"] + [next_id]),
+                "time_ms": round(total_time, 1), "attn_total": round(attn_total, 1),
+                "moe_total": round(moe_total, 1),
+                "other_ms": round(total_time - attn_total - moe_total, 1),
+                "preds": preds, "kv_cache": kv_info,
+                "hidden": last_step_data.get("hidden", []),
+                "routing": last_step_data.get("routing", []),
+                "attn_ms": last_step_data.get("attn_ms", []),
+                "moe_ms": last_step_data.get("moe_ms", []),
+                "embedding": last_step_data.get("embedding", []),
+                "attentions": attn_data, "seq_strs": seq_strs,
+                "mods": {k: v for k, v in mods.items()},
+            }
+            
+            # Update session
+            session["generated_ids"].append(next_id)
+            session["input_ids"] = torch.cat([session["input_ids"], torch.tensor([[next_id]], device=DEVICE)], dim=-1)
+            mods["forced_token"] = None
+            
+            del outputs, logits
+            torch.cuda.empty_cache()
+            return result
     
-    _hooks_active = False
-    return result
+    except RuntimeError as e:
+        # GPU error — reset everything to safe state
+        print(f"GPU SAFETY: {e}", flush=True)
+        torch.cuda.empty_cache()
+        # Reset all modifications that might have caused the issue
+        mods["forced_experts"] = {}
+        mods["disabled_experts"] = {}
+        mods["forced_token"] = None
+        mods["n_active_experts"] = 8
+        return {"error": f"GPU safety stop: {e}. All modifications reset. Try again."}
+    
+    finally:
+        # ALWAYS clean up, even on error
+        _hooks_active = False
+        is_generating = False
+        torch.cuda.empty_cache()
 
 
 # ===== ROUTES =====
