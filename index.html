@@ -97,7 +97,7 @@ canvas{display:block;width:100%}
 
 <div class="wrap">
   <div class="chat">
-    <div class="chat-h">Chat</div>
+    <div class="chat-h" style="display:flex;align-items:center;justify-content:space-between">Chat<div style="display:flex;gap:6px"><button class="btn" style="padding:3px 10px;font-size:11px" onclick="clearChat()">Clear</button><button class="btn" style="padding:3px 10px;font-size:11px" onclick="location.reload()">Restart</button></div></div>
     <div class="msgs" id="msgs"></div>
     <div class="inp">
       <textarea id="ti" placeholder="Ask..." rows="1"></textarea>
@@ -130,6 +130,16 @@ function addM(role,text){
   var d=document.createElement("div");d.className="m "+(role==="user"?"u":"a");
   d.innerHTML='<div class="r">'+(role==="user"?"You":"Assistant")+'</div><div class="b">'+text+'</div>';
   var c=document.getElementById("msgs");c.appendChild(d);c.scrollTop=c.scrollHeight;return d;
+}
+
+async function clearChat(){
+  stopAuto();
+  await fetch("/api/clear",{method:"POST"});
+  document.getElementById("msgs").innerHTML="";
+  document.getElementById("an").innerHTML='<div class="empty">Send a message to begin. Each token is analyzed step by step.</div>';
+  curMsg=null;curText="";stepData=null;
+  document.getElementById("sb").disabled=false;
+  document.getElementById("ti").focus();
 }
 
 function send(){
