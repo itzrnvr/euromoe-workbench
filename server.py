@@ -224,12 +224,12 @@ def generate_step():
     
     try:
         with torch.inference_mode():
-            outputs = model(session["input_ids"], use_cache=True, output_attentions=True)
+            outputs = model(session["input_ids"], use_cache=True, output_attentions=False)
             logits = outputs.logits[:, -1, :]
             
             # GUARD 5: check for NaN in output (corrupted routing can cause this)
             if torch.isnan(logits).any() or torch.isinf(logits).any():
-                raise RuntimeError("NaN/Inf detected in model output — resetting modifications")
+                raise RuntimeError("NaN/Inf in output — resetting mods")
             
             # Token selection
             if mods["forced_token"] is not None:
@@ -257,13 +257,9 @@ def generate_step():
                             total_el += t.numel()
                 kv_info = {"n_tokens": session["input_ids"].shape[1], "size_mb": round(total_el * 2 / 1048576, 1)}
             
-            # Attention weights (last layer, last query)
+            # Attention: only last layer, last 20 tokens (reduced payload)
             attn_data = []
-            seq_strs = [tokenizer.decode([t]) for t in session["input_ids"][0]]
-            if outputs.attentions:
-                for li, attn in enumerate(outputs.attentions):
-                    w = attn[0, :, -1, :].float().mean(dim=0).cpu()
-                    attn_data.append({"layer": li, "weights": [round(v, 4) for v in w.tolist()]})
+            seq_strs = [tokenizer.decode([t]) for t in session["input_ids"][0][-20:]]
             
             total_time = (time.perf_counter() - t_start) * 1000
             attn_total = sum(a["ms"] for a in last_step_data.get("attn_ms", []))
@@ -271,20 +267,21 @@ def generate_step():
             
             token_str = tokenizer.decode([next_id])
             
+            # STRIPPED response — only what frontend needs
             result = {
                 "token": token_str, "token_id": next_id, "forced": forced,
                 "text": tokenizer.decode(session["generated_ids"] + [next_id]),
-                "time_ms": round(total_time, 1), "attn_total": round(attn_total, 1),
+                "time_ms": round(total_time, 1),
+                "attn_total": round(attn_total, 1),
                 "moe_total": round(moe_total, 1),
-                "other_ms": round(total_time - attn_total - moe_total, 1),
+                "other_ms": round(max(0, total_time - attn_total - moe_total), 1),
                 "preds": preds, "kv_cache": kv_info,
                 "hidden": last_step_data.get("hidden", []),
-                "routing": last_step_data.get("routing", []),
+                "routing": [{"layer": r["layer"], "indices": r["indices"], "weights": r["weights"]} for r in last_step_data.get("routing", [])],
                 "attn_ms": last_step_data.get("attn_ms", []),
                 "moe_ms": last_step_data.get("moe_ms", []),
-                "embedding": last_step_data.get("embedding", []),
-                "attentions": attn_data, "seq_strs": seq_strs,
-                "mods": {k: v for k, v in mods.items()},
+                "attentions": attn_data,
+                "seq_strs": seq_strs,
             }
             
             # Update session
