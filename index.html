@@ -165,7 +165,7 @@ function buildPanels(){
         <div class="at-top" id="at"><div style="color:var(--m);font-size:12px">Waiting...</div></div>
         <div id="arows"></div>
       </div>
-      <div class="p"><h3><span class="n">2</span> Router</h3><div class="d">8 of 64 experts selected. Click to override.</div>
+      <div class="p"><h3><span class="n">2</span> Router</h3><div class="d">8 of 64 experts selected per layer.</div>
         <div style="font-size:11px;color:var(--m);margin-bottom:6px">Layer <b id="rl" style="color:var(--t)">—</b></div>
         <div class="eg" id="eg"></div>
       </div>
@@ -229,7 +229,6 @@ function handleData(d){
       var c=document.getElementById("e"+i);var p=ei.indexOf(i);
       if(p>=0){c.className="ec "+(ew[p]===mw?"hot":"on");c.innerHTML="E"+i+'<span class="pct">'+(ew[p]*100).toFixed(0)+'%</span>';}
       else{c.className="ec";c.innerHTML="E"+i;}
-      c.onclick=(function(idx){return function(){toggleExp(idx);};})(i);
     }
   }
   

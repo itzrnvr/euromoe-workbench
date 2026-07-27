@@ -44,6 +44,7 @@ timing = {"attn": [], "moe": [], "total": 0}
 
 # Hooks
 _hooks_active = False
+is_generating = False  # concurrent generation lock
 
 def load_model():
     global model, tokenizer, n_layers, n_experts, n_heads, hidden_size
@@ -71,55 +72,10 @@ def load_model():
                     if rl.dim() == 3: rl = rl[:, -1, :]
                     probs = F.softmax(rl.float(), dim=-1).squeeze(0)
                     
-                    # Apply modifications — WITH SAFETY CHECKS
-                    forced = mods["forced_experts"].get(str(layer_idx)) or mods["forced_experts"].get(layer_idx)
-                    disabled = mods["disabled_experts"].get(str(layer_idx)) or mods["disabled_experts"].get(layer_idx)
-                    
-                    if forced:
-                        # SAFETY: validate indices are in range and unique
-                        forced = [int(x) for x in forced if isinstance(x, (int, float)) and 0 <= int(x) < n_experts]
-                        forced = list(set(forced))  # remove duplicates
-                        if len(forced) == 0:
-                            forced = list(range(8))  # fallback to default
-                        # Clamp count to avoid topk errors
-                        forced = forced[:min(len(forced), n_experts)]
-                        
-                        forced_idx = torch.tensor(forced, device=DEVICE, dtype=torch.long)
-                        forced_w = probs[forced_idx]
-                        # SAFETY: prevent division by zero
-                        w_sum = forced_w.sum().clamp_min(1e-8)
-                        forced_w = forced_w / w_sum
-                        # SAFETY: check for NaN/Inf
-                        if torch.isnan(forced_w).any() or torch.isinf(forced_w).any():
-                            forced_w = torch.ones_like(forced_w) / len(forced)  # uniform fallback
-                        tw_new = forced_w.unsqueeze(0)
-                        ti_new = forced_idx.unsqueeze(0)
-                        return (rl, tw_new, ti_new)
-                    
-                    if disabled:
-                        # SAFETY: validate indices
-                        disabled = [int(x) for x in disabled if isinstance(x, (int, float)) and 0 <= int(x) < n_experts]
-                        probs_modified = probs.clone()
-                        for d in disabled:
-                            probs_modified[d] = 0
-                        # SAFETY: check that at least n_active experts remain
-                        n_remaining = (probs_modified > 0).sum().item()
-                        n_keep = min(mods["n_active_experts"], n_remaining)
-                        if n_keep < 1:
-                            # All experts disabled — skip modification, use original
-                            pass
-                        else:
-                            p_sum = probs_modified.sum().clamp_min(1e-8)
-                            probs_modified = probs_modified / p_sum
-                            # SAFETY: check for NaN
-                            if torch.isnan(probs_modified).any() or torch.isinf(probs_modified).any():
-                                probs_modified = probs  # fallback to original
-                            else:
-                                tw_new, ti_new = torch.topk(probs_modified, k=n_keep)
-                                tw_new = tw_new / tw_new.sum().clamp_min(1e-8)
-                                tw_new = tw_new.unsqueeze(0) if tw_new.dim()==1 else tw_new
-                                ti_new = ti_new.unsqueeze(0) if ti_new.dim()==1 else ti_new
-                                return (rl, tw_new, ti_new)
+                    # NOTE: Expert override (force/disable) removed for GPU safety.
+                    # The Mixtral MoE CUDA kernels validate expert indices internally
+                    # and any modification causes device-side assert → CUDA context corruption.
+                    # The routing data is captured read-only below.
                     
                     # Store real routing
                     if _hooks_active:
@@ -364,8 +320,12 @@ def api_step():
     
     result = generate_step()
     
+    # If error from safety guard, return it directly
+    if "error" in result:
+        return jsonify(result)
+    
     # Check EOS
-    if result["token_id"] == tokenizer.eos_token_id:
+    if result.get("token_id") == tokenizer.eos_token_id:
         result["done"] = True
         session["chat_history"][-1]["assistant"] = tokenizer.decode(session["generated_ids"])
     
