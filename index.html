@@ -363,6 +363,7 @@ async function doCommit(token_id){
   document.getElementById("commit-area").style.display="none";
   var r=await fetch("/api/commit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token_id:token_id})});
   var d=await r.json();if(d.error){alert(d.error);return;}
+  var txt=(d.text||"").split("").join("");
     curText=txt;
   if(curMsg){curMsg.querySelector(".msg-b").textContent=txt;var c=document.getElementById("msgs");c.scrollTop=c.scrollHeight;}
   selectedPred=null;analyzeData=null;
@@ -406,3 +407,6 @@ document.getElementById("ti").addEventListener("keydown",function(e){if(e.key===
 
 
 
+</script>
+</body>
+</html>
