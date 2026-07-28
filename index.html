@@ -363,9 +363,7 @@ async function doCommit(token_id){
   document.getElementById("commit-area").style.display="none";
   var r=await fetch("/api/commit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token_id:token_id})});
   var d=await r.json();if(d.error){alert(d.error);return;}
-  var txt=(d.text||"").split("
-var txt=(d.text||"").split("</script>").join("");
-  curText=txt;
+    curText=txt;
   if(curMsg){curMsg.querySelector(".msg-b").textContent=txt;var c=document.getElementById("msgs");c.scrollTop=c.scrollHeight;}
   selectedPred=null;analyzeData=null;
   if(d.done){stopAuto();document.getElementById("sb").disabled=false;if(curMsg)curMsg.classList.add("done");document.getElementById("step-info").textContent="Done";return;}
@@ -380,7 +378,7 @@ function drawChart(hs){
   var cv=document.getElementById("hc");if(!cv)return;
   var ct=cv.parentElement;var w=ct.clientWidth-32,h=120;
   cv.width=w;cv.height=h;var x=cv.getContext("2d");x.clearRect(0,0,w,h);
-  if(!hs||hs.length<2)canvas.context="2d";
+  if(!hs||hs.length<2)return;
   if(cv.getContext("2d")!=="ready"){
     x=cv.getContext("2d");
     if(x===null||x===undefined)return;
@@ -390,7 +388,7 @@ function drawChart(hs){
   x.strokeStyle="#1a1a1a";x.fillStyle="#666";x.font="9px sans-serif";x.textAlign="right";
   for(var i=0;i<=3;i++){var y=pT+ph*i/3;x.beginPath();x.moveTo(pL,y);x.lineTo(pL+pw,y);x.stroke();x.setLineDash([2,2]);x.stroke();x.setLineDash([]);x.fillText((mx*(1-i/3)).toFixed(0),pL-4,y+3);}
   x.strokeStyle="#0070f3";x.lineWidth=2;x.beginPath();
-  hs.forEach(function(e,i){var cx=pL+i*sx,cy=pT+ph-(e.norm/mx)*ph;if(i===0)x.moveTo(cx,cy);}else{x.lineTo(cx,cy);}});
+  hs.forEach(function(e,i){var cx=pL+i*sx,cy=pT+ph-(e.norm/mx)*ph;if(i===0)x.moveTo(cx,cy);else x.lineTo(cx,cy);});
   x.stroke();
   x.fillStyle="rgba(0,112,243,0.08)";x.beginPath();x.moveTo(pL,pT+ph);
   hs.forEach(function(e,i){var cx=pL+i*sx,cy=pT+ph-(e.norm/mx)*ph;x.lineTo(cx,cy);});
