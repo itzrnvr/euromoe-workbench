@@ -396,7 +396,7 @@ function drawChart(hs){
   x.lineTo(pL+pw,pT+ph);x.fill();
   x.fillStyle="#666";x.textAlign="center";
   hs.forEach(function(e,i){if(i%8===0||i===hs.length-1)x.fillText("L"+(e.layer+1),pL+i*sx,pT+ph+12);});
-  var pk=0,pv=0;hs.forEach(function(e,ii{if(e.norm>pv){pv=e.norm;pk=i;}});
+  var pk=0,pv=0;hs.forEach(function(e,i){if(e.norm>pv){pv=e.norm;pk=i;}});
   var px=pL+pk*sx,py=pT+ph-(pv/mx)*ph;
   x.fillStyle="#0070f3";x.beginPath();x.arc(px,py,3,0,Math.PI*2);x.fill();
   var pl=document.getElementById("pk");if(pl)pl.textContent="Peak L"+(hs[pk].layer+1)+": "+pv.toFixed(0);
